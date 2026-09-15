@@ -18,13 +18,12 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
-import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
@@ -37,11 +36,17 @@ import java.io.FileInputStream
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PatchScreen(pkg: String, navController: NavController, vm: PatchViewModel = viewModel()) {
-    val state   by vm.state.collectAsStateWithLifecycle()
-    val ctx      = LocalContext.current
-    val logState = rememberLazyListState()
+    val state    by vm.state.collectAsStateWithLifecycle()
+    val ctx       = LocalContext.current
+    val logState  = rememberLazyListState()
 
-    // Auto-scroll log to bottom
+    // Scan on first open to auto-check relevant patches
+    LaunchedEffect(pkg) {
+        if (state.scanResults.isEmpty() && !state.isScanning) {
+            vm.scan(pkg)
+        }
+    }
+
     val logLines = when (val ps = state.patchState) {
         is PatchState.Running -> ps.log
         is PatchState.Success -> ps.log
@@ -54,7 +59,7 @@ fun PatchScreen(pkg: String, navController: NavController, vm: PatchViewModel = 
 
     // Install result receiver
     DisposableEffect(Unit) {
-        val filter = IntentFilter("com.azluk.patcher.INSTALL_RESULT_LOCAL")
+        val filter   = IntentFilter("com.azluk.patcher.INSTALL_RESULT_LOCAL")
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context, i: Intent) {
                 val status = i.getIntExtra(PackageInstaller.EXTRA_STATUS, -999)
@@ -62,7 +67,7 @@ fun PatchScreen(pkg: String, navController: NavController, vm: PatchViewModel = 
                 if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
                     val confirm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                         i.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
-                    else @Suppress("DEPRECATION") i.getParcelableExtra(Intent.EXTRA_INTENT)
+                    else @Suppress("DEPRECATION") i.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
                     confirm?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     confirm?.let { ctx.startActivity(it) }
                 } else {
@@ -77,11 +82,21 @@ fun PatchScreen(pkg: String, navController: NavController, vm: PatchViewModel = 
         onDispose { ctx.unregisterReceiver(receiver) }
     }
 
+    val isRunning = state.patchState is PatchState.Running
+    val isDone    = state.patchState is PatchState.Success || state.patchState is PatchState.Failure
+
     Scaffold(
         containerColor = AzlukBg,
         topBar = {
             TopAppBar(
-                title = { Text("Patch", color = AzlukOnBg, fontWeight = FontWeight.SemiBold) },
+                title = {
+                    Column {
+                        Text("Patch", color = AzlukOnBg,
+                            fontWeight = FontWeight.SemiBold)
+                        Text(pkg, color = AzlukOnSurface, fontSize = 11.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
                         Icon(Icons.Default.ArrowBack, null, tint = AzlukOnSurface)
@@ -89,162 +104,321 @@ fun PatchScreen(pkg: String, navController: NavController, vm: PatchViewModel = 
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = AzlukSurface)
             )
+        },
+        bottomBar = {
+            if (!isDone && !isRunning) {
+                Surface(
+                    color = AzlukSurface,
+                    tonalElevation = 3.dp
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick  = { vm.scan(pkg) },
+                            enabled  = !state.isScanning,
+                            modifier = Modifier.weight(1f),
+                            shape    = RoundedCornerShape(12.dp),
+                            border   = BorderStroke(1.dp, AzlukSurfaceVar)
+                        ) {
+                            if (state.isScanning) {
+                                CircularProgressIndicator(
+                                    Modifier.size(14.dp),
+                                    color = AzlukBlue, strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Search, null,
+                                    Modifier.size(16.dp), tint = AzlukBlue)
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Text("Rescan", color = AzlukBlue,
+                                fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        Button(
+                            onClick  = { vm.patch(pkg) },
+                            enabled  = state.selectedPatches.isNotEmpty(),
+                            modifier = Modifier.weight(2f),
+                            shape    = RoundedCornerShape(12.dp),
+                            colors   = ButtonDefaults.buttonColors(containerColor = AzlukBlue)
+                        ) {
+                            Icon(Icons.Default.Build, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Start Patch", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
         }
     ) { padding ->
-        Column(
+        LazyColumn(
+            state = logState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 14.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .padding(padding),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Spacer(Modifier.height(6.dp))
-
-            // Patch type selection
-            Text("Patch Types", color = AzlukOnBg, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-            Surface(color = AzlukSurface, shape = RoundedCornerShape(14.dp)) {
-                Column(Modifier.padding(8.dp)) {
-                    PatchType.values().forEach { type ->
-                        val selected = type in state.selectedPatches
+            // ── Scan status ──────────────────────────────────────────────────
+            item {
+                AnimatedVisibility(state.isScanning) {
+                    Surface(
+                        color = AzlukSurface,
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { vm.togglePatch(type) }
-                                .padding(horizontal = 8.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Checkbox(
-                                checked  = selected,
-                                onCheckedChange = { vm.togglePatch(type) },
-                                colors   = CheckboxDefaults.colors(
-                                    checkedColor   = AzlukBlue,
-                                    uncheckedColor = AzlukOnSurface
-                                )
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(type.displayName, color = AzlukOnBg, fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium)
-                                Text(type.description, color = AzlukOnSurface, fontSize = 11.sp,
-                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                        if (type != PatchType.values().last()) {
-                            Divider(color = AzlukSurfaceVar, thickness = .5.dp,
-                                modifier = Modifier.padding(horizontal = 12.dp))
+                            CircularProgressIndicator(
+                                Modifier.size(16.dp),
+                                color = AzlukBlue, strokeWidth = 2.dp)
+                            Text("Scanning DEX files…",
+                                color = AzlukOnSurface, fontSize = 13.sp)
                         }
                     }
                 }
             }
 
-            // Patch button
-            val isIdle = state.patchState is PatchState.Idle || state.patchState is PatchState.Failure
-            Button(
-                onClick  = { if (isIdle) vm.patch(pkg) },
-                enabled  = isIdle && state.selectedPatches.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-                colors   = ButtonDefaults.buttonColors(containerColor = AzlukBlue),
-                shape    = RoundedCornerShape(14.dp)
-            ) {
-                if (state.patchState is PatchState.Running) {
-                    CircularProgressIndicator(
-                        color    = Color.White,
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text("Patching…", fontWeight = FontWeight.Bold)
-                } else {
-                    Icon(Icons.Default.Build, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Start Patch", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            // Scan results banner
+            if (state.scanResults.isNotEmpty()) {
+                item {
+                    val detected = state.scanResults.mapNotNull {
+                        try { PatchType.valueOf(it.patchType) } catch (_: Exception) { null }
+                    }.toSet()
+                    Surface(
+                        color = AzlukBlue.copy(.08f),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, AzlukBlue.copy(.2f))
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text("${state.scanResults.size} opportunities detected",
+                                color = AzlukBlue, fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp)
+                            Spacer(Modifier.height(4.dp))
+                            Text(detected.joinToString(" · ") { it.displayName },
+                                color = AzlukOnSurface, fontSize = 11.sp)
+                        }
+                    }
                 }
             }
 
-            // Log output
-            AnimatedVisibility(logLines.isNotEmpty()) {
+            // ── Patch type selection ─────────────────────────────────────────
+            item {
+                Text("Patch Options", color = AzlukOnBg,
+                    fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            }
+
+            val detectedTypes = state.scanResults
+                .mapNotNull { try { PatchType.valueOf(it.patchType) }
+                    catch (_: Exception) { null } }.toSet()
+
+            items(PatchType.values().toList()) { type ->
+                val selected   = type in state.selectedPatches
+                val wasDetected= type in detectedTypes
+                val enabled    = !isRunning && !isDone
+
                 Surface(
-                    color  = AzlukSurface,
-                    shape  = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth()
+                    color = when {
+                        selected && wasDetected -> AzlukBlue.copy(.10f)
+                        selected -> AzlukSurface
+                        else -> AzlukSurface
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (selected) AzlukBlue.copy(.4f) else AzlukSurfaceVar
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled) { vm.togglePatch(type) }
                 ) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text("Log", color = AzlukOnSurface, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(6.dp))
-                        Box(Modifier.heightIn(max = 220.dp)) {
-                            LazyColumn(state = logState) {
-                                items(logLines) { line ->
-                                    Text(
-                                        line,
-                                        color    = if (line.startsWith("✗")) AzlukError
-                                                   else if (line.startsWith("Done")) AzlukSuccess
-                                                   else AzlukOnSurface,
-                                        fontSize = 11.sp,
-                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                                    )
+                    Row(
+                        Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked        = selected,
+                            onCheckedChange = { if (enabled) vm.togglePatch(type) },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor   = AzlukBlue,
+                                uncheckedColor = AzlukOnSurface
+                            )
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(type.displayName, color = AzlukOnBg,
+                                    fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                if (wasDetected) {
+                                    Surface(
+                                        color = AzlukSuccess.copy(.12f),
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text("DETECTED", color = AzlukSuccess,
+                                            fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp))
+                                    }
                                 }
                             }
+                            Text(type.description, color = AzlukOnSurface,
+                                fontSize = 11.sp, maxLines = 2,
+                                overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
             }
 
-            // Success card + install button
+            // ── Running state with live log ──────────────────────────────────
+            if (isRunning) {
+                item {
+                    Surface(
+                        color = AzlukSurface,
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    Modifier.size(18.dp),
+                                    color = AzlukBlue, strokeWidth = 2.dp)
+                                Text("Patching in progress…",
+                                    color = AzlukBlue, fontWeight = FontWeight.SemiBold)
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            logLines.takeLast(12).forEach { line ->
+                                Text(
+                                    line,
+                                    color    = when {
+                                        line.startsWith("✗") -> AzlukError
+                                        line.startsWith("✓") || line.startsWith("Done") -> AzlukSuccess
+                                        else -> AzlukOnSurface
+                                    },
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Success ──────────────────────────────────────────────────────
             if (state.patchState is PatchState.Success) {
                 val outputPath = (state.patchState as PatchState.Success).outputPath
-                Surface(
-                    color  = AzlukSuccess.copy(alpha = .08f),
-                    shape  = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, AzlukSuccess.copy(alpha = .3f)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("✅ Patch complete!", color = AzlukSuccess, fontWeight = FontWeight.Bold)
-                        Text(outputPath, color = AzlukOnSurface, fontSize = 11.sp,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = { installApk(ctx, outputPath) },
-                                modifier = Modifier.weight(1f),
-                                colors   = ButtonDefaults.buttonColors(containerColor = AzlukBlue),
-                                shape    = RoundedCornerShape(10.dp)
-                            ) { Text("Install", fontWeight = FontWeight.Bold) }
-                            OutlinedButton(
-                                onClick = { vm.resetPatch() },
-                                modifier = Modifier.weight(1f),
-                                shape    = RoundedCornerShape(10.dp),
-                                border   = BorderStroke(1.dp, AzlukSurfaceVar)
-                            ) { Text("Reset", color = AzlukOnSurface) }
+                item {
+                    Surface(
+                        color  = AzlukSuccess.copy(.07f),
+                        shape  = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, AzlukSuccess.copy(.25f))
+                    ) {
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text("✅ Patch complete!",
+                                color = AzlukSuccess, fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp)
+                            Text(outputPath, color = AzlukOnSurface,
+                                fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+
+                            // Full log collapsible
+                            var showLog by remember { mutableStateOf(false) }
+                            TextButton(onClick = { showLog = !showLog }) {
+                                Text(if (showLog) "Hide log" else "Show full log",
+                                    color = AzlukBlue, fontSize = 12.sp)
+                            }
+                            AnimatedVisibility(showLog) {
+                                Column {
+                                    logLines.forEach { line ->
+                                        Text(line, color = AzlukOnSurface,
+                                            fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                                    }
+                                }
+                            }
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick  = { installApk(ctx, outputPath) },
+                                    modifier = Modifier.weight(1f),
+                                    colors   = ButtonDefaults.buttonColors(containerColor = AzlukBlue),
+                                    shape    = RoundedCornerShape(12.dp)
+                                ) {
+                                    Icon(Icons.Default.InstallMobile, null, Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Install", fontWeight = FontWeight.Bold)
+                                }
+                                OutlinedButton(
+                                    onClick  = { vm.resetPatch() },
+                                    modifier = Modifier.weight(1f),
+                                    shape    = RoundedCornerShape(12.dp),
+                                    border   = BorderStroke(1.dp, AzlukSurfaceVar)
+                                ) { Text("Patch Again", color = AzlukOnSurface) }
+                            }
                         }
                     }
                 }
             }
 
-            // Install result
-            when (val ist = state.installState) {
-                is InstallState.Success -> {
+            // ── Failure ──────────────────────────────────────────────────────
+            if (state.patchState is PatchState.Failure) {
+                val err = (state.patchState as PatchState.Failure)
+                item {
                     Surface(
-                        color  = AzlukSuccess.copy(alpha = .08f),
-                        shape  = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, AzlukSuccess.copy(alpha = .3f)),
-                        modifier = Modifier.fillMaxWidth()
+                        color  = AzlukError.copy(.07f),
+                        shape  = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, AzlukError.copy(.25f))
+                    ) {
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("❌ Patch failed",
+                                color = AzlukError, fontWeight = FontWeight.Bold)
+                            Text(err.error, color = AzlukOnBg, fontSize = 12.sp)
+                            Button(
+                                onClick = { vm.resetPatch() },
+                                colors  = ButtonDefaults.buttonColors(containerColor = AzlukBlue),
+                                shape   = RoundedCornerShape(12.dp)
+                            ) { Text("Try Again") }
+                        }
+                    }
+                }
+            }
+
+            // ── Install result ───────────────────────────────────────────────
+            when (val ist = state.installState) {
+                is InstallState.Success -> item {
+                    Surface(
+                        color  = AzlukSuccess.copy(.07f),
+                        shape  = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, AzlukSuccess.copy(.25f))
                     ) {
                         Text("✅ Installed successfully!",
-                            color    = AzlukSuccess,
-                            fontWeight = FontWeight.Bold,
+                            color = AzlukSuccess, fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(14.dp))
                     }
                 }
-                is InstallState.Failure -> {
+                is InstallState.Failure -> item {
                     Surface(
-                        color  = AzlukError.copy(alpha = .08f),
-                        shape  = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, AzlukError.copy(alpha = .3f)),
-                        modifier = Modifier.fillMaxWidth()
+                        color  = AzlukError.copy(.07f),
+                        shape  = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, AzlukError.copy(.25f))
                     ) {
-                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("❌ ${ist.code}", color = AzlukError, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Column(
+                            Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text("❌ ${ist.code}", color = AzlukError,
+                                fontWeight = FontWeight.Bold, fontSize = 13.sp)
                             Text(ist.message, color = AzlukOnBg, fontSize = 12.sp)
                             Text(ist.description, color = AzlukOnSurface, fontSize = 11.sp)
                         }
@@ -253,7 +427,7 @@ fun PatchScreen(pkg: String, navController: NavController, vm: PatchViewModel = 
                 else -> {}
             }
 
-            Spacer(Modifier.height(16.dp))
+            item { Spacer(Modifier.height(8.dp)) }
         }
     }
 }
