@@ -97,8 +97,7 @@ fun ToolsScreen(
 
     state.message?.let { msg ->
         LaunchedEffect(msg) {
-            delay(3000)
-            vm.dismissMessage()
+            kotlinx.coroutines.delay(3000)
         }
     }
 
