@@ -70,8 +70,11 @@ class ToolsViewModel : ViewModel() {
             .filter { it.isFile }
             .sumOf { it.length() }
 
-        val patchedDir = File(
-            android.os.Environment.getExternalStorageDirectory(),
+        val extFree = remember {
+    runCatching {
+        android.os.Environment.getExternalStorageDirectory().freeSpace
+    }.getOrDefault(0L)
+        }
             "AzlukPatcher/Patched"
         )
 
