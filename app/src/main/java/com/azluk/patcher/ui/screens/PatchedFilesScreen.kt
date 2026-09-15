@@ -32,7 +32,14 @@ import java.util.*
 @Composable
 fun PatchedFilesScreen(navController: NavController) {
     val ctx   = LocalContext.current
-    var files by remember { mutableStateOf(StorageUtils.getPatchedFiles()) }
+    var files by remember { mutableStateOf<List<File>>(emptyList()) }
+
+LaunchedEffect(Unit) {
+    withContext(Dispatchers.IO) {
+        val result = runCatching { StorageUtils.getPatchedFiles() }.getOrDefault(emptyList())
+        withContext(Dispatchers.Main) { files = result }
+    }
+}
     val fmt   = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
 
     fun refresh() { files = StorageUtils.getPatchedFiles() }
