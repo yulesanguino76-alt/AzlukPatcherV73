@@ -3,7 +3,6 @@ package com.azluk.patcher.ui.screens
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.provider.Settings
 import androidx.compose.animation.*
@@ -37,22 +36,11 @@ data class ToolsState(
     val ramAvail: Long = 0L,
     val cacheSize: Long = 0L,
     val patchedSize: Long = 0L,
-    val wifiNets: List<WifiNet> = emptyList(),
-    val wifiScanning: Boolean = false,
-    val wifiEnabled: Boolean = false,
     val cleaning: Boolean = false,
     val cleanedBytes: Long = 0L,
     val message: String? = null
 )
 
-data class WifiNet(
-    val ssid: String,
-    val bssid: String,
-    val rssi: Int,
-    val frequency: Int,
-    val security: String,
-    val channel: Int
-)
 
 class ToolsViewModel : ViewModel() {
     private val _state = MutableStateFlow(ToolsState())
@@ -92,118 +80,6 @@ class ToolsViewModel : ViewModel() {
         }
     }
 
-    fun scanWifi(ctx: Context) = viewModelScope.launch(Dispatchers.IO) {
-        _state.update {
-            it.copy(
-                wifiScanning = true,
-                wifiNets     = emptyList()
-            )
-        }
-
-        try {
-            val wm = ctx.applicationContext.getSystemService(
-                Context.WIFI_SERVICE
-            ) as WifiManager
-
-            val enabled = wm.isWifiEnabled
-
-            _state.update { it.copy(wifiEnabled = enabled) }
-
-            if (!enabled) {
-                _state.update { it.copy(wifiScanning = false) }
-                return@launch
-            }
-
-            wm.startScan()
-            delay(2000)
-
-            val results = wm.scanResults
-
-            val nets = results
-                .map { r ->
-                    val ssid = if (Build.VERSION.SDK_INT >= 33) {
-                        r.wifiSsid?.toString()?.trim('"') ?: ""
-                    } else {
-                        @Suppress("DEPRECATION")
-                        r.SSID ?: ""
-                    }
-
-                    val sec = when {
-                        r.capabilities.contains("WPA3") -> "WPA3"
-                        r.capabilities.contains("WPA2") -> "WPA2"
-                        r.capabilities.contains("WPA")  -> "WPA"
-                        r.capabilities.contains("WEP")  -> "WEP"
-                        else                            -> "Open"
-                    }
-
-                    val ch = when {
-                        r.frequency < 2484  -> ((r.frequency - 2412) / 5) + 1
-                        r.frequency == 2484 -> 14
-                        else                -> ((r.frequency - 5180) / 5) + 36
-                    }
-
-                    WifiNet(
-                        ssid     = ssid.ifEmpty { "<hidden>" },
-                        bssid    = r.BSSID ?: "",
-                        rssi     = r.level,
-                        frequency = r.frequency,
-                        security = sec,
-                        channel  = ch
-                    )
-                }
-                .sortedByDescending { it.rssi }
-
-            _state.update {
-                it.copy(
-                    wifiNets     = nets,
-                    wifiScanning = false
-                )
-            }
-        } catch (e: Exception) {
-            _state.update {
-                it.copy(
-                    wifiScanning = false,
-                    message      = "Scan failed: ${e.message}"
-                )
-            }
-        }
-    }
-
-    fun cleanCache(ctx: Context) = viewModelScope.launch(Dispatchers.IO) {
-        _state.update { it.copy(cleaning = true, cleanedBytes = 0L) }
-
-        var cleaned = 0L
-
-        ctx.cacheDir.walkTopDown().forEach { f ->
-            if (f.isFile) { cleaned += f.length(); f.delete() }
-        }
-
-        ctx.externalCacheDir?.walkTopDown()?.forEach { f ->
-            if (f.isFile) { cleaned += f.length(); f.delete() }
-        }
-
-        _state.update {
-            it.copy(
-                cleaning     = false,
-                cleanedBytes = cleaned,
-                message      = "Cleaned ${fmt(cleaned)}"
-            )
-        }
-
-        loadStats(ctx)
-    }
-
-    fun dismissMessage() {
-        _state.update { it.copy(message = null) }
-    }
-
-    private fun fmt(b: Long) = when {
-        b < 1024            -> "$b B"
-        b < 1024 * 1024     -> "%.1f KB".format(b / 1024f)
-        b < 1024L * 1024 * 1024 -> "%.1f MB".format(b / (1024f * 1024))
-        else                -> "%.2f GB".format(b / (1024f * 1024 * 1024))
-    }
-}
 
 // ── UI ───────────────────────────────────────────────────────────────────────
 
@@ -251,7 +127,7 @@ fun ToolsScreen(
             }
         }
 
-        val tabs = listOf("Device", "WiFi Scanner", "Cleaner")
+        val tabs = listOf("Device", "Cleaner")
 
         ScrollableTabRow(
             selectedTabIndex = activeTab,
@@ -270,8 +146,7 @@ fun ToolsScreen(
 
         when (activeTab) {
             0 -> DeviceTab(state, ctx, vm)
-            1 -> WifiTab(state, ctx, vm)
-            2 -> CleanerTab(state, ctx, vm)
+            1 -> CleanerTab(state, ctx, vm)
         }
     }
 }
@@ -375,92 +250,7 @@ private fun DeviceTab(
     }
 }
 
-@Composable
-private fun WifiTab(
-    state: ToolsState,
-    ctx: Context,
-    vm: ToolsViewModel
-) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        Button(
-            onClick  = { vm.scanWifi(ctx) },
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            enabled  = !state.wifiScanning,
-            colors   = ButtonDefaults.buttonColors(containerColor = AzlukBlue)
-        ) {
-            if (state.wifiScanning) {
-                CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
-                Spacer(Modifier.width(8.dp))
-                Text("Scanning…")
-            } else {
-                Icon(Icons.Default.Wifi, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Scan WiFi Networks")
-            }
-        }
 
-        if (!state.wifiEnabled && !state.wifiScanning) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("WiFi is disabled", color = AzlukOnSurface)
-            }
-            return@Column
-        }
-
-        if (state.wifiNets.isEmpty() && !state.wifiScanning) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Tap scan to find networks", color = AzlukOnSurface)
-            }
-            return@Column
-        }
-
-        Text(
-            "${state.wifiNets.size} networks found",
-            color    = AzlukOnSurface,
-            fontSize = 12.sp,
-            modifier = Modifier.padding(horizontal = 16.dp)
-        )
-        Spacer(Modifier.height(8.dp))
-
-        LazyColumn(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(state.wifiNets) { net -> WifiNetCard(net) }
-        }
-    }
-}
-
-@Composable
-private fun WifiNetCard(net: WifiNet) {
-    val signalPct  = WifiManager.calculateSignalLevel(net.rssi, 100)
-    val signalColor = when {
-        signalPct > 66 -> AzlukSuccess
-        signalPct > 33 -> AzlukWarning
-        else           -> AzlukError
-    }
-    val secColor = if (net.security == "Open") AzlukError else AzlukSuccess
-
-    GlassCard {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.Wifi, null, tint = signalColor, modifier = Modifier.size(28.dp))
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(net.ssid, color = AzlukOnBg, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                Text(net.bssid, color = AzlukOnSurface, fontSize = 11.sp)
-                Spacer(Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    MiniChip(net.security,         secColor)
-                    MiniChip("Ch ${net.channel}",  AzlukBlue)
-                    MiniChip("${net.frequency} MHz", AzlukOnSurface)
-                }
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Text("$signalPct%", color = signalColor, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                Text("${net.rssi} dBm", color = AzlukOnSurface, fontSize = 10.sp)
-            }
-        }
-    }
-}
 
 @Composable
 private fun CleanerTab(
