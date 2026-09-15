@@ -275,29 +275,87 @@ class ApkEngine(private val ctx: Context) {
     // ── DEX SCAN ─────────────────────────────────────────────────────────────
 
     private fun scanFile(apk: File): List<ScanResult> {
-        val results = mutableListOf<ScanResult>()
-        var dexIndex = 0
+    val results = mutableListOf<ScanResult>()
+    var dexIndex = 0
 
-        ZipInputStream(
-            BufferedInputStream(FileInputStream(apk), 65536)
-        ).use { z ->
-            var e = z.nextEntry
+    ZipInputStream(
+        BufferedInputStream(FileInputStream(apk), 32768)
+    ).use { z ->
+        var e = z.nextEntry
+        while (e != null) {
+            if (e.name.endsWith(".dex")) {
+                results.addAll(scanDexStream(z, dexIndex++))
+            } else {
+                z.skip(Long.MAX_VALUE) // skip without loading
+            }
+            e = z.nextEntry
+        }
+    }
+    return results.distinctBy { it.patchType + it.desc }
+}
 
-            while (e != null) {
-                if (e.name.endsWith(".dex")) {
-                    val data = z.readBytes()
+// Streaming scan — never loads full DEX into RAM
+// 128KB chunks with 512B overlap so patterns never split across boundaries
+private fun scanDexStream(z: ZipInputStream, idx: Int): List<ScanResult> {
+    val CHUNK   = 131072
+    val OVERLAP = 512
+    val buf     = ByteArray(CHUNK + OVERLAP)
+    val prev    = ByteArray(OVERLAP)
+    var prevLen = 0
+    var first   = true
+    val found   = mutableSetOf<String>()
+    val results = mutableListOf<ScanResult>()
 
-                    if (isDex(data)) {
-                        results.addAll(scanDex(data, dexIndex++))
-                    }
-                }
+    while (true) {
+        System.arraycopy(prev, 0, buf, 0, prevLen)
+        var read = 0
+        while (read < CHUNK) {
+            val n = z.read(buf, prevLen + read, CHUNK - read)
+            if (n == -1) break
+            read += n
+        }
+        if (read == 0 && prevLen == 0) break
+        val avail = prevLen + read
 
-                e = z.nextEntry
+        // Verify DEX magic on first chunk
+        if (first) {
+            first = false
+            if (avail < 4 ||
+                buf[0] != 0x64.toByte() || buf[1] != 0x65.toByte() ||
+                buf[2] != 0x78.toByte() || buf[3] != 0x0a.toByte()) {
+                // skip rest of entry
+                while (z.read(buf) != -1) {}
+                return results
             }
         }
 
-        return results.distinctBy { it.patchType + it.desc }
+        // Scan window for all patterns
+        for (pat in PATTERNS) {
+            val key = pat[0]
+            if (found.contains(pat[1] + pat[2])) continue
+            if (indexOfAscii(buf, key, avail) >= 0) {
+                found.add(pat[1] + pat[2])
+                results.add(ScanResult(pat[1], pat[2], idx, 0))
+            }
+        }
+
+        // Keep last OVERLAP bytes for next iteration
+        prevLen = minOf(OVERLAP, avail)
+        System.arraycopy(buf, avail - prevLen, prev, 0, prevLen)
+        if (read < CHUNK) break
     }
+    return results
+}
+
+private fun indexOfAscii(buf: ByteArray, pattern: String, len: Int): Int {
+    val p = pattern.toByteArray(Charsets.UTF_8)
+    val end = minOf(len, buf.size) - p.size
+    outer@ for (i in 0..end) {
+        for (j in p.indices) if (buf[i + j] != p[j]) continue@outer
+        return i
+    }
+    return -1
+}
 
     private fun scanDex(dex: ByteArray, idx: Int): List<ScanResult> {
         val results = mutableListOf<ScanResult>()
