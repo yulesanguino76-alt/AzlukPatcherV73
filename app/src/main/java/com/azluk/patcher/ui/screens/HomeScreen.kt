@@ -70,7 +70,7 @@ fun HomeScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Image(
-                            painter = painterResource(R.mipmap.ic_launcher),
+                            painter = painterResource(R.mipmap.ic_launcher_foreground),
                             contentDescription = "AzlukPatcher",
                             modifier = Modifier
                                 .size(40.dp)
