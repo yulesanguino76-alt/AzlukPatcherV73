@@ -25,6 +25,7 @@ import androidx.navigation.compose.*
 import androidx.navigation.navArgument
 import com.azluk.patcher.ui.screens.*
 import com.azluk.patcher.ui.theme.AzlukTheme
+import com.azluk.patcher.ui.screens.ToolsScreen
 
 class MainActivity : ComponentActivity() {
 
