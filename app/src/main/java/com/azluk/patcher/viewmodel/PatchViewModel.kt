@@ -11,28 +11,38 @@ import kotlinx.coroutines.flow.*
 import java.io.File
 
 data class PatchUiState(
-    val selectedPatches: Set<PatchType> = setOf(
-        PatchType.LICENSE_BYPASS, PatchType.IAP_BYPASS,
-        PatchType.REMOVE_ADS, PatchType.SIGNATURE_BYPASS
-    ),
-    val patchState: PatchState      = PatchState.Idle,
-    val installState: InstallState  = InstallState.Idle,
+    val selectedPatches: Set<PatchType> = emptySet(), // starts empty, filled after scan
+    val patchState:  PatchState   = PatchState.Idle,
+    val installState: InstallState = InstallState.Idle,
     val scanResults: List<ScanResult> = emptyList(),
-    val isScanning: Boolean         = false
+    val isScanning: Boolean = false
 )
 
 class PatchViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _state = MutableStateFlow(PatchUiState())
     val state: StateFlow<PatchUiState> = _state.asStateFlow()
-
     private val engine = ApkEngine(app)
 
     fun scan(pkg: String) {
         viewModelScope.launch(Dispatchers.IO) {
             _state.update { it.copy(isScanning = true, scanResults = emptyList()) }
             val results = runCatching { engine.scan(pkg) }.getOrDefault(emptyList())
-            _state.update { it.copy(isScanning = false, scanResults = results) }
+
+            // Auto-select detected patch types
+            val detected = results.mapNotNull {
+                try { PatchType.valueOf(it.patchType) } catch (_: Exception) { null }
+            }.toSet()
+
+            // If nothing detected, default to safe common patches
+            val autoSelected = if (detected.isNotEmpty()) detected
+                else setOf(PatchType.LICENSE_BYPASS, PatchType.REMOVE_ADS)
+
+            _state.update { it.copy(
+                isScanning   = false,
+                scanResults  = results,
+                selectedPatches = autoSelected
+            )}
         }
     }
 
@@ -46,7 +56,8 @@ class PatchViewModel(app: Application) : AndroidViewModel(app) {
 
     fun patch(pkg: String) {
         val patches = _state.value.selectedPatches.toList()
-        val log     = mutableListOf<String>()
+        if (patches.isEmpty()) return
+        val log = mutableListOf<String>()
         viewModelScope.launch(Dispatchers.IO) {
             _state.update { it.copy(patchState = PatchState.Running(log.toList())) }
             try {
@@ -64,7 +75,7 @@ class PatchViewModel(app: Application) : AndroidViewModel(app) {
 
     fun patchFile(file: File) {
         val patches = _state.value.selectedPatches.toList()
-        val log     = mutableListOf<String>()
+        val log = mutableListOf<String>()
         viewModelScope.launch(Dispatchers.IO) {
             _state.update { it.copy(patchState = PatchState.Running(log.toList())) }
             try {
@@ -81,41 +92,36 @@ class PatchViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun onInstallResult(status: Int, message: String?) {
-        val installState = when (status) {
+        val ist = when (status) {
             PackageInstaller.STATUS_SUCCESS -> InstallState.Success
-            PackageInstaller.STATUS_FAILURE_INVALID ->
-                InstallState.Failure(
-                    code        = "INSTALL_FAILURE_INVALID",
-                    message     = "Invalid APK — signature or structure is corrupt.",
-                    description = "PARSE_FAILED: APK signature or structure invalid. Usually means the signing block is corrupt.",
-                    canRetry    = true
-                )
-            PackageInstaller.STATUS_FAILURE_CONFLICT ->
-                InstallState.Failure(
-                    code        = "INSTALL_FAILURE_CONFLICT",
-                    message     = "Version conflict — uninstall the original app first.",
-                    description = message ?: "A different version is already installed.",
-                    canRetry    = false
-                )
-            PackageInstaller.STATUS_FAILURE_BLOCKED ->
-                InstallState.Failure(
-                    code        = "INSTALL_FAILURE_BLOCKED",
-                    message     = "Installation blocked by policy.",
-                    description = "Enable 'Install unknown apps' for AzlukPatcher in Settings.",
-                    canRetry    = false
-                )
-            else ->
-                InstallState.Failure(
-                    code        = "INSTALL_FAILURE_$status",
-                    message     = message ?: "Unknown error (code $status)",
-                    description = "Unexpected installer error.",
-                    canRetry    = true
-                )
+            PackageInstaller.STATUS_FAILURE_INVALID -> InstallState.Failure(
+                "INSTALL_FAILURE_INVALID",
+                "Invalid APK — signature or structure is corrupt.",
+                "PARSE_FAILED: signing block may be malformed.", true
+            )
+            PackageInstaller.STATUS_FAILURE_CONFLICT -> InstallState.Failure(
+                "INSTALL_FAILURE_CONFLICT",
+                "Version conflict — uninstall the original app first.",
+                message ?: "A different version is already installed.", false
+            )
+            PackageInstaller.STATUS_FAILURE_BLOCKED -> InstallState.Failure(
+                "INSTALL_FAILURE_BLOCKED",
+                "Installation blocked.",
+                "Enable 'Install unknown apps' for AzlukPatcher in Settings.", false
+            )
+            else -> InstallState.Failure(
+                "INSTALL_FAILURE_$status",
+                message ?: "Unknown error (code $status)",
+                "Unexpected installer error.", true
+            )
         }
-        _state.update { it.copy(installState = installState) }
+        _state.update { it.copy(installState = ist) }
     }
 
     fun resetPatch() {
-        _state.update { it.copy(patchState = PatchState.Idle, installState = InstallState.Idle) }
+        _state.update { it.copy(
+            patchState   = PatchState.Idle,
+            installState = InstallState.Idle
+        )}
     }
 }
