@@ -23,13 +23,15 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.*
 import androidx.navigation.navArgument
-import com.azluk.patcher.ui.screens.*
-import com.azluk.patcher.ui.theme.AzlukTheme
+import com.azluk.patcher.ui.screens.DetailScreen
+import com.azluk.patcher.ui.screens.HomeScreen
+import com.azluk.patcher.ui.screens.PatchScreen
+import com.azluk.patcher.ui.screens.PatchedFilesScreen
 import com.azluk.patcher.ui.screens.ToolsScreen
+import com.azluk.patcher.ui.theme.AzlukTheme
 
 class MainActivity : ComponentActivity() {
 
-    // State that drives the UI — no repeated setContent calls
     private val permissionState = mutableStateOf(false)
 
     private val permLauncher = registerForActivityResult(
@@ -40,14 +42,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         permissionState.value = hasRequiredPermission()
 
-        // setContent called ONCE — permission state drives composable tree
         setContent {
             AzlukTheme {
                 val hasPermission by permissionState
-
                 if (hasPermission) {
                     AzlukApplication()
                 } else {
@@ -58,14 +57,11 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        if (!hasRequiredPermission()) {
-            requestRequiredPermission()
-        }
+        if (!hasRequiredPermission()) requestRequiredPermission()
     }
 
     override fun onResume() {
         super.onResume()
-        // Update state when returning from Settings
         permissionState.value = hasRequiredPermission()
     }
 
@@ -80,7 +76,6 @@ class MainActivity : ComponentActivity() {
 
     private fun requestRequiredPermission() {
         if (hasRequiredPermission()) return
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 startActivity(Intent(
@@ -88,9 +83,8 @@ class MainActivity : ComponentActivity() {
                     Uri.parse("package:$packageName")
                 ))
             } catch (_: Exception) {
-                try {
-                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-                } catch (_: Exception) {}
+                try { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+                catch (_: Exception) {}
             }
         } else {
             permLauncher.launch(arrayOf(
@@ -138,13 +132,10 @@ private fun PermissionRequiredScreen(onRequestPermission: () -> Unit) {
             "AzlukPatcher necesita acceso completo al almacenamiento para parchear APKs.",
             modifier = Modifier.padding(bottom = 24.dp)
         )
-        Button(onClick = onRequestPermission) {
-            Text("Conceder permiso")
-        }
+        Button(onClick = onRequestPermission) { Text("Conceder permiso") }
     }
 }
 
-// BroadcastReceiver for PackageInstaller results
 class InstallReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -999)
