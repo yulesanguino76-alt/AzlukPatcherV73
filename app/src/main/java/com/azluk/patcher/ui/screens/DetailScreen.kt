@@ -246,8 +246,8 @@ fun DetailScreen(pkg: String, navController: NavController) {
                 containerColor   = AzlukSurface,
                 contentColor     = AzlukBlue,
                 indicator = { tabPositions ->
-                    TabRowDefaults.Indicator(
-                        Modifier.tabIndicatorOffset(tabPositions[activeTab])
+                    TabRowDefaults.SecondaryIndicator(
+                        Modifier.tabIndicatorOffset(tabPositions[activeTab]),
                         color = AzlukBlue
                     )
                 }
@@ -444,3 +444,4 @@ private fun fmtSize(b: Long) = when {
     b < 1024L*1024*1024 -> "%.1f MB".format(b/(1024f*1024))
     else -> "%.2f GB".format(b/(1024f*1024*1024))
 }
+
