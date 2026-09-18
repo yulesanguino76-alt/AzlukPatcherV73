@@ -444,11 +444,11 @@ object ApkSignerV2 {
     }
 
     private fun buildAttrs(digest: ByteArray): ByteArray {
-        // contentType + messageDigest attributes
+        // contentType + messageDigest authenticated attributes (PKCS#9)
         val contentType = buildSeq(
             buildOid(byteArrayOf(0x2a, 0x86.toByte(), 0x48, 0x86.toByte(), 0xf7.toByte(), 0x0d, 0x01, 0x09, 0x03)) +
-            buildSet(buildSeq(buildOid(OID_DATA)
-            )
+            buildSet(buildSeq(buildOid(OID_DATA)))
+        )
         val msgDigest = buildSeq(
             buildOid(byteArrayOf(0x2a, 0x86.toByte(), 0x48, 0x86.toByte(), 0xf7.toByte(), 0x0d, 0x01, 0x09, 0x04)) +
             buildSet(buildOctetString(digest))
