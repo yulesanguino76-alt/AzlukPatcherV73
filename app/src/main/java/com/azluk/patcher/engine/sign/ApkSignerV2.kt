@@ -111,15 +111,141 @@ object ApkSignerV2 {
 
     // ── PUBLIC API ────────────────────────────────────────────────────────────
 
-    @Throws(Exception::class)
-    /** File-to-file signing — avoids loading full APK in RAM twice */
+    /**
+     * File-to-file V1 signing — 2-pass streaming, never loads full APK in RAM.
+     * Pass 1: stream ZIP entries to compute SHA-256 digests for MANIFEST.MF + CERT.SF
+     * Pass 2: stream ZIP entries again, append META-INF files, write to output
+     * This avoids the OOM crash on large APKs (50MB+).
+     */
     fun sign(input: File, output: File) {
-        val signed = sign(input.readBytes())   // DEX already loaded; APK is smaller post-strip
-        output.writeBytes(signed)
+        val cert   = loadCert()
+        val key    = loadKey()
+        val sha256 = MessageDigest.getInstance("SHA-256")
+
+        // ── Pass 1: compute per-entry digests ────────────────────────────────
+        val digests = LinkedHashMap<String, String>()
+        val buf     = ByteArray(65536)
+
+        ZipInputStream(BufferedInputStream(FileInputStream(input), 65536)).use { zis ->
+            var e = zis.nextEntry
+            while (e != null) {
+                val name = e.name
+                val skip = e.isDirectory || (name.startsWith("META-INF/") &&
+                    (name.endsWith(".SF") || name.endsWith(".RSA") ||
+                     name.endsWith(".DSA") || name.endsWith(".EC") ||
+                     name.endsWith(".MF")))
+                if (!skip) {
+                    sha256.reset()
+                    var n = zis.read(buf)
+                    while (n != -1) { sha256.update(buf, 0, n); n = zis.read(buf) }
+                    digests[name] = android.util.Base64.encodeToString(
+                        sha256.digest(), android.util.Base64.NO_WRAP)
+                } else {
+                    while (zis.read(buf) != -1) {} // drain
+                }
+                zis.closeEntry()
+                e = zis.nextEntry
+            }
+        }
+
+        // ── Build META-INF files ─────────────────────────────────────────────
+        val mfSb = StringBuilder("Manifest-Version: 1.0
+Created-By: AzlukPatcher V7
+
+")
+        for ((name, dig) in digests) {
+            mfSb.append("Name: $name
+")
+            mfSb.append("SHA-256-Digest: $dig
+
+")
+        }
+        val mfBytes = mfSb.toString().toByteArray(Charsets.UTF_8)
+
+        sha256.reset()
+        val mfDigest = android.util.Base64.encodeToString(
+            sha256.digest(mfBytes), android.util.Base64.NO_WRAP)
+
+        val sfBytes = buildString {
+            append("Signature-Version: 1.0
+")
+            append("Created-By: 1.0 (AzlukPatcher)
+")
+            append("SHA-256-Digest-Manifest: $mfDigest
+
+")
+        }.toByteArray(Charsets.UTF_8)
+
+        val certRsa = pkcs7Sign(sfBytes, cert, key)
+
+        // ── Pass 2: repack ZIP + inject META-INF ─────────────────────────────
+        val tmp = File(output.parent, output.name + ".v1tmp")
+        ZipInputStream(BufferedInputStream(FileInputStream(input), 65536)).use { zis ->
+            ZipOutputStream(BufferedOutputStream(FileOutputStream(tmp), 65536)).use { zos ->
+                var e = zis.nextEntry
+                while (e != null) {
+                    val name = e.name
+                    val drop = name.startsWith("META-INF/") &&
+                        (name.endsWith(".SF") || name.endsWith(".RSA") ||
+                         name.endsWith(".DSA") || name.endsWith(".EC") ||
+                         name.endsWith(".MF"))
+                    if (!drop) {
+                        val stored = name == "resources.arsc" || name.endsWith(".so")
+                        if (stored) {
+                            // STORED needs size+crc — must buffer this entry
+                            val data = zis.readBytes()
+                            val crc  = CRC32().also { it.update(data) }.value
+                            zos.putNextEntry(ZipEntry(name).apply {
+                                method         = ZipEntry.STORED
+                                size           = data.size.toLong()
+                                compressedSize = data.size.toLong()
+                                crc            = crc
+                            })
+                            zos.write(data)
+                        } else {
+                            zos.putNextEntry(ZipEntry(name).apply { method = ZipEntry.DEFLATED })
+                            var n = zis.read(buf)
+                            while (n != -1) { zos.write(buf, 0, n); n = zis.read(buf) }
+                        }
+                        zos.closeEntry()
+                    } else {
+                        while (zis.read(buf) != -1) {} // drain dropped entry
+                    }
+                    zis.closeEntry()
+                    e = zis.nextEntry
+                }
+                // Inject META-INF
+                fun writeEntry(name: String, data: ByteArray) {
+                    zos.putNextEntry(ZipEntry(name).apply { method = ZipEntry.DEFLATED })
+                    zos.write(data); zos.closeEntry()
+                }
+                writeEntry("META-INF/MANIFEST.MF", mfBytes)
+                writeEntry("META-INF/CERT.SF",     sfBytes)
+                writeEntry("META-INF/CERT.RSA",    certRsa)
+            }
+        }
+
+        // Move tmp to output (v1 signed, ready for v2 block if needed)
+        tmp.renameTo(output)
+        Log.d(TAG, "V1 sign done: ${output.length()} bytes")
     }
 
     fun sign(apk: ByteArray): ByteArray {
-        Log.d(TAG, "sign() start size=${apk.size}")
+        // Use file-based signing to avoid double-RAM OOM on large APKs
+        val tmpIn  = createTempFile("azluk_in",  ".apk")
+        val tmpOut = createTempFile("azluk_out", ".apk")
+        return try {
+            tmpIn.writeBytes(apk)
+            sign(tmpIn, tmpOut)
+            tmpOut.readBytes()
+        } finally {
+            tmpIn.delete(); tmpOut.delete()
+        }
+    }
+
+    @Suppress("unused")
+    private fun signLegacy(apk: ByteArray): ByteArray {
+        Log.d(TAG, "signLegacy() start size=${apk.size}")
         val cert = loadCert()
         val key  = loadKey()
         val v1   = signV1(apk, cert, key)
