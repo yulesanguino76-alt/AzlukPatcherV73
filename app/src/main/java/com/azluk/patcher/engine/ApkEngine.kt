@@ -59,21 +59,23 @@ class ApkEngine(private val ctx: Context) {
 
     // ── PUBLIC ────────────────────────────────────────────────────────────────
 
-    fun quickStatus(pkg: String): PatchStatus = try {
-        val ai  = ctx.packageManager.getApplicationInfo(pkg, 0)
-        val apk = File(ai.sourceDir)
-        if (apk.length() > 150L * 1024 * 1024) return PatchStatus.LIKELY
-        val r = scanFile(apk)
-        when {
-            r.isEmpty() -> PatchStatus.UNKNOWN
-            r.any { it.desc?.let { d ->
-                d.contains("SafetyNet") || d.contains("Frida") ||
-                d.contains("Xposed")   || d.contains("Integrity") } == true
-            } -> PatchStatus.COMPLEX
-            r.size > 2  -> PatchStatus.PATCHABLE
-            else        -> PatchStatus.LIKELY
-        }
-    } catch (e: Exception) { PatchStatus.UNKNOWN }
+    fun quickStatus(pkg: String): PatchStatus {
+        return try {
+            val ai  = ctx.packageManager.getApplicationInfo(pkg, 0)
+            val apk = File(ai.sourceDir)
+            if (apk.length() > 150L * 1024 * 1024) return PatchStatus.LIKELY
+            val r = scanFile(apk)
+            when {
+                r.isEmpty() -> PatchStatus.UNKNOWN
+                r.any { it.desc?.let { d ->
+                    d.contains("SafetyNet") || d.contains("Frida") ||
+                    d.contains("Xposed")   || d.contains("Integrity") } == true
+                } -> PatchStatus.COMPLEX
+                r.size > 2  -> PatchStatus.PATCHABLE
+                else        -> PatchStatus.LIKELY
+            }
+        } catch (e: Exception) { PatchStatus.UNKNOWN }
+    }
 
     fun quickCount(pkg: String): Int = try {
         val ai = ctx.packageManager.getApplicationInfo(pkg, 0)
@@ -445,8 +447,9 @@ class ApkEngine(private val ctx: Context) {
                 first = false
                 if (avail < 4 || buf[0] != 0x64.toByte() || buf[1] != 0x65.toByte() ||
                     buf[2] != 0x78.toByte() || buf[3] != 0x0a.toByte()) {
-                    while (z.read(buf) != -1) {}; return results
-                }y
+                    while (z.read(buf) != -1) {}
+                    return results
+                }
             }
 
             for (pat in PATTERNS) {
