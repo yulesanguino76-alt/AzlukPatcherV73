@@ -2,6 +2,7 @@ package com.azluk.patcher.engine.sign
 
 import android.util.Log
 import java.io.*
+import java.io.File
 import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -111,6 +112,12 @@ object ApkSignerV2 {
     // ── PUBLIC API ────────────────────────────────────────────────────────────
 
     @Throws(Exception::class)
+    /** File-to-file signing — avoids loading full APK in RAM twice */
+    fun sign(input: File, output: File) {
+        val signed = sign(input.readBytes())   // DEX already loaded; APK is smaller post-strip
+        output.writeBytes(signed)
+    }
+
     fun sign(apk: ByteArray): ByteArray {
         Log.d(TAG, "sign() start size=${apk.size}")
         val cert = loadCert()
@@ -440,8 +447,8 @@ object ApkSignerV2 {
         // contentType + messageDigest attributes
         val contentType = buildSeq(
             buildOid(byteArrayOf(0x2a, 0x86.toByte(), 0x48, 0x86.toByte(), 0xf7.toByte(), 0x0d, 0x01, 0x09, 0x03)) +
-            buildSet(buildSeq(buildOid(OID_DATA)))
-        )
+            buildSet(buildSeq(buildOid(OID_DATA)
+            )
         val msgDigest = buildSeq(
             buildOid(byteArrayOf(0x2a, 0x86.toByte(), 0x48, 0x86.toByte(), 0xf7.toByte(), 0x0d, 0x01, 0x09, 0x04)) +
             buildSet(buildOctetString(digest))
