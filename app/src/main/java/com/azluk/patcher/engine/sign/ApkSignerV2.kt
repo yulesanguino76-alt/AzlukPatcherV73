@@ -435,7 +435,6 @@ object ApkSignerV2 {
     private fun buildOid(o: ByteArray)             = buildTlv(0x06, o)
     private fun buildOctetString(d: ByteArray)     = buildTlv(0x04, d)
     private fun buildNull()                        = byteArrayOf(0x05, 0x00)
-    private fun buildRaw(d: ByteArray)             = byteArrayOf(0x05, 0x00)
     private fun buildRaw(d: ByteArray)             = d
 
     private fun buildInteger(n: BigInteger): ByteArray {
@@ -444,6 +443,8 @@ object ApkSignerV2 {
         return buildTlv(0x02, b)
     }
     private fun buildInteger(n: Int) = buildInteger(BigInteger.valueOf(n.toLong()))
+
+    // ── encoding helpers ──────────────────────────────────────────────────────
 
     private fun prefixU32(data: ByteArray): ByteArray {
         val buf = ByteBuffer.allocate(4 + data.size).order(ByteOrder.LITTLE_ENDIAN)
