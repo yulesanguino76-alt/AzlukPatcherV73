@@ -13,17 +13,17 @@ import java.util.zip.*
 /**
  * ApkSignerV2 — APK Signature Scheme v1 (JAR) + v2 (Signing Block).
  *
- * V7.3 fixes vs V7:
- * - Removed raw \n inside StringBuilder() constructor → was killing the Kotlin parser
- * - Fixed var e → iterator pattern (no val reassignment)
- * - mfBytes scoped correctly so signV2 can see it
- * - 256KB I/O buffers (was 64KB)
- * - Parallel SHA-256 chunk digesting via thread pool for v2 block
+ * V7.3 — fixed:
+ * 1. CERT.SF now includes per-entry SHA-256-Digest lines (was only manifest digest)
+ *    → missing these caused INSTALL_PARSE_FAILED_NO_CERTIFICATES on all API 24+
+ * 2. CERT.SF now includes X-Android-APK-Signed: 2 header
+ *    → without it, Android double-validates v1 even when v2 block is present
+ * 3. buildString{} for all string assembly — no raw \n in StringBuilder()
+ * 4. 256KB I/O buffers, parallel chunk digesting for v2
  *
- * *privately: the buildString lambda eats \r\n cleanly because it's
- *  a string template, not a StringBuilder constructor argument.
- *  that's the entire root cause of the cascade. one misplaced \n
- *  and 30 parse errors light up like a christmas tree.*
+ * *privately: the CERT.SF was 129 bytes covering 1047 entries.
+ *  it should be ~116KB. Android reads every Name: entry in the SF,
+ *  finds none, treats the APK as unsigned. game over.*
  */
 object ApkSignerV2 {
     private const val TAG = "ApkSignerV2"
@@ -32,11 +32,11 @@ object ApkSignerV2 {
         0x41, 0x50, 0x4b, 0x20, 0x53, 0x69, 0x67, 0x20,
         0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x20, 0x34, 0x32
     )
-    private const val V2_ID         = 0x7109871a
+    private const val V2_ID          = 0x7109871a
     private const val SIG_RSA_SHA256 = 0x0103
     private const val DIGEST_SHA256  = 0x0403
-    private const val CHUNK          = 1024 * 1024          // 1 MB chunks for v2
-    private const val BUF            = 256 * 1024           // 256 KB I/O buffer
+    private const val CHUNK          = 1024 * 1024
+    private const val BUF            = 256 * 1024
 
     private val OID_SHA256_WITH_RSA = byteArrayOf(
         0x2a, 0x86.toByte(), 0x48, 0x86.toByte(), 0xf7.toByte(), 0x0d, 0x01, 0x01, 0x0b
@@ -105,12 +105,6 @@ object ApkSignerV2 {
 
     // ── PUBLIC API ────────────────────────────────────────────────────────────
 
-    /**
-     * File-based sign: 2-pass streaming, never loads the full APK in RAM.
-     * Pass 1 — stream entries, compute SHA-256 digests for MF + SF.
-     * Pass 2 — repack ZIP, inject META-INF, write output.
-     * Then append V2 signing block in-place on the output file.
-     */
     fun sign(input: File, output: File) {
         val cert   = loadCert()
         val key    = loadKey()
@@ -124,8 +118,7 @@ object ApkSignerV2 {
             var entry = zis.nextEntry
             while (entry != null) {
                 val name = entry.name
-                val skip = entry.isDirectory || isSigEntry(name)
-                if (!skip) {
+                if (!entry.isDirectory && !isSigEntry(name)) {
                     sha256.reset()
                     var n = zis.read(buf)
                     while (n != -1) { sha256.update(buf, 0, n); n = zis.read(buf) }
@@ -140,9 +133,6 @@ object ApkSignerV2 {
         }
 
         // ── Build MANIFEST.MF ─────────────────────────────────────────────────
-        // FIX: use buildString{} so \r\n are embedded in string templates,
-        // NOT passed as raw newlines inside a StringBuilder constructor → that
-        // was the entire root cause of the 30 parse errors on lines 152-176.
         val mfBytes = buildString {
             append("Manifest-Version: 1.0\r\n")
             append("Created-By: AzlukPatcher V7\r\n")
@@ -154,7 +144,12 @@ object ApkSignerV2 {
             }
         }.toByteArray(Charsets.UTF_8)
 
-        // ── Build CERT.SF ──────────────────────────────────────────────────────
+        // ── Build CERT.SF — FIX: per-entry digests + X-Android-APK-Signed ───
+        // Android API 24+ (PackageParser) requires CERT.SF to contain either:
+        //   a) per-entry Section-Digests for every entry in MANIFEST.MF, OR
+        //   b) X-Android-APK-Signed: 2 (delegates trust to v2 block)
+        // Without (a) AND (b), installer returns INSTALL_PARSE_FAILED_NO_CERTIFICATES.
+        // We include BOTH for maximum compatibility across API levels.
         sha256.reset()
         val mfDigest = android.util.Base64.encodeToString(
             sha256.digest(mfBytes), android.util.Base64.NO_WRAP)
@@ -162,8 +157,26 @@ object ApkSignerV2 {
         val sfBytes = buildString {
             append("Signature-Version: 1.0\r\n")
             append("Created-By: 1.0 (AzlukPatcher)\r\n")
+            // FIX 1: tell Android the v2 block is authoritative
+            append("X-Android-APK-Signed: 2\r\n")
             append("SHA-256-Digest-Manifest: $mfDigest\r\n")
             append("\r\n")
+            // FIX 2: per-entry section digests
+            // Each section = "Name: <entry>\r\nSHA-256-Digest: <mf_section_digest>\r\n\r\n"
+            // The digest covers the corresponding MANIFEST.MF section bytes
+            for ((name, dig) in digests) {
+                val sectionBytes = buildString {
+                    append("Name: $name\r\n")
+                    append("SHA-256-Digest: $dig\r\n")
+                    append("\r\n")
+                }.toByteArray(Charsets.UTF_8)
+                sha256.reset()
+                val sectionDig = android.util.Base64.encodeToString(
+                    sha256.digest(sectionBytes), android.util.Base64.NO_WRAP)
+                append("Name: $name\r\n")
+                append("SHA-256-Digest: $sectionDig\r\n")
+                append("\r\n")
+            }
         }.toByteArray(Charsets.UTF_8)
 
         val certRsa = pkcs7Sign(sfBytes, cert, key)
@@ -199,7 +212,6 @@ object ApkSignerV2 {
                     zis.closeEntry()
                     entry = zis.nextEntry
                 }
-                // Inject META-INF signing files
                 injectEntry(zos, "META-INF/MANIFEST.MF", mfBytes)
                 injectEntry(zos, "META-INF/CERT.SF",     sfBytes)
                 injectEntry(zos, "META-INF/CERT.RSA",    certRsa)
@@ -212,7 +224,6 @@ object ApkSignerV2 {
         Log.d(TAG, "sign() done → ${output.length()} bytes")
     }
 
-    /** ByteArray convenience overload — writes to temp files to avoid double-RAM OOM. */
     fun sign(apk: ByteArray): ByteArray {
         val tmpIn  = File.createTempFile("azluk_in",  ".apk")
         val tmpOut = File.createTempFile("azluk_out", ".apk")
@@ -226,22 +237,12 @@ object ApkSignerV2 {
         }
     }
 
-    // ── V2 block appended to a file ───────────────────────────────────────────
+    // ── V2 block ──────────────────────────────────────────────────────────────
 
-    /**
-     * Reads the file, computes the v2 digest across all three sections
-     * (contents / CD / EOCD), builds the signing block, and writes it
-     * between the file contents and the central directory — all without
-     * loading the full APK into a single byte array.
-     *
-     * Speed-up: chunk digests are computed in parallel across
-     * java.util.concurrent thread pool — each 1 MB chunk gets its own
-     * SHA-256 instance so there's zero contention on the MessageDigest.
-     */
     private fun appendV2Block(file: File, cert: X509Certificate, key: PrivateKey) {
-        val apk        = file.readBytes()                   // needed for random-access sections
+        val apk        = file.readBytes()
         val eocdOffset = findEocd(apk)
-            ?: throw IOException("EOCD not found in v1-signed APK")
+            ?: throw IOException("EOCD not found")
 
         val cdOffset = (ByteBuffer.wrap(apk, eocdOffset + 16, 4)
             .order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL).toInt()
@@ -257,9 +258,9 @@ object ApkSignerV2 {
         val signerBlock   = buildV2SignerBlock(signedData, sig, cert)
         val signingBlock  = buildApkSigningBlock(signerBlock)
 
-        // Patch EOCD CD offset and write final file
         val newCdOffset = (contents.size + signingBlock.size).toLong()
-        ByteBuffer.wrap(eocd, 16, 4).order(ByteOrder.LITTLE_ENDIAN).putInt(newCdOffset.toInt())
+        ByteBuffer.wrap(eocd, 16, 4).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(newCdOffset.toInt())
 
         FileOutputStream(file).use { fos ->
             fos.write(contents)
@@ -269,46 +270,32 @@ object ApkSignerV2 {
         }
     }
 
-    // ── Parallel chunk digesting ──────────────────────────────────────────────
-
-    /**
-     * Splits content/CD/EOCD into 1 MB chunks and digests them in parallel
-     * using a fixed thread pool sized to min(cores, 4).
-     * SHA-256 is not thread-safe, so each thread allocates its own instance.
-     * Results are gathered in-order via Future<ByteArray>.
-     */
     private fun digestChunkedParallel(vararg sections: ByteArray): ByteArray {
         val pool = java.util.concurrent.Executors.newFixedThreadPool(
             minOf(Runtime.getRuntime().availableProcessors(), 4))
 
-        data class ChunkFuture(val index: Int, val future: java.util.concurrent.Future<ByteArray>)
-        val futures = mutableListOf<ChunkFuture>()
-        var chunkIndex = 0
+        val futures = mutableListOf<java.util.concurrent.Future<ByteArray>>()
 
         for (section in sections) {
             var offset = 0
             while (offset < section.size) {
                 val start = offset
                 val end   = minOf(offset + CHUNK, section.size)
-                val ci    = chunkIndex++
-                val f     = pool.submit<ByteArray> {
+                futures.add(pool.submit<ByteArray> {
                     val sha = MessageDigest.getInstance("SHA-256")
                     val hdr = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN)
                         .put(0xa5.toByte()).putInt(end - start).array()
                     sha.update(hdr)
                     sha.update(section, start, end - start)
                     sha.digest()
-                }
-                futures.add(ChunkFuture(ci, f))
+                })
                 offset = end
             }
         }
         pool.shutdown()
 
-        // Collect in-order
-        val chunkDigests = Array(futures.size) { futures[it].future.get() }
+        val chunkDigests = Array(futures.size) { futures[it].get() }
 
-        // Top-level digest: 0x5a || u32_le(count) || concat(digests)
         val sha = MessageDigest.getInstance("SHA-256")
         val out = ByteArrayOutputStream()
         out.write(byteArrayOf(0x5a))
@@ -319,17 +306,13 @@ object ApkSignerV2 {
         return sha.digest()
     }
 
-    // ── V2 structure builders ─────────────────────────────────────────────────
-
     private fun buildV2SignedData(digest: ByteArray, cert: X509Certificate): ByteArray {
         val digestEntry = ByteBuffer.allocate(4 + 4 + digest.size)
             .order(ByteOrder.LITTLE_ENDIAN)
             .putInt(DIGEST_SHA256).putInt(digest.size).put(digest).array()
         val digestsList = prefixU32(digestEntry)
-
-        val certDer   = cert.encoded
-        val certsList = prefixU32(prefixU32(certDer))
-        val attrsList = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(0).array()
+        val certsList   = prefixU32(prefixU32(cert.encoded))
+        val attrsList   = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(0).array()
 
         val baos = ByteArrayOutputStream()
         baos.write(prefixU32(digestsList))
@@ -353,10 +336,8 @@ object ApkSignerV2 {
     }
 
     private fun buildApkSigningBlock(signerBlock: ByteArray): ByteArray {
-        // Spec: [size_before u64][pairs...][size_before u64][magic 16]
-        // pair layout: [pair_len u64][id u32][value bytes]
         val pairLen = (4L + signerBlock.size)
-        val pair    = ByteArrayOutputStream().also { b ->
+        val pair = ByteArrayOutputStream().also { b ->
             b.write(u64le(pairLen))
             b.write(u32le(V2_ID))
             b.write(signerBlock)
@@ -386,24 +367,24 @@ object ApkSignerV2 {
         return null
     }
 
-    // ── PKCS7 manual DER ─────────────────────────────────────────────────────
+    // ── PKCS7 ─────────────────────────────────────────────────────────────────
 
     private fun pkcs7Sign(sfBytes: ByteArray, cert: X509Certificate, key: PrivateKey): ByteArray {
-        val sha256  = MessageDigest.getInstance("SHA-256")
-        val digest  = sha256.digest(sfBytes)
-        val signer  = Signature.getInstance("SHA256withRSA")
+        val sha256 = MessageDigest.getInstance("SHA-256")
+        val digest = sha256.digest(sfBytes)
+        val signer = Signature.getInstance("SHA256withRSA")
         signer.initSign(key); signer.update(sfBytes)
-        val rawSig  = signer.sign()
+        val rawSig = signer.sign()
 
-        val issuer  = cert.issuerX500Principal.encoded
-        val serial  = cert.serialNumber
+        val issuer = cert.issuerX500Principal.encoded
+        val serial = cert.serialNumber
 
-        val digestAlgId    = buildSeq(buildOid(OID_SHA256) + buildNull())
-        val sigAlgId       = buildSeq(buildOid(OID_SHA256_WITH_RSA) + buildNull())
+        val digestAlgId     = buildSeq(buildOid(OID_SHA256) + buildNull())
+        val sigAlgId        = buildSeq(buildOid(OID_SHA256_WITH_RSA) + buildNull())
         val issuerAndSerial = buildSeq(buildRaw(issuer) + buildInteger(serial))
-        val digestAlgIds   = buildSet(digestAlgId)
-        val authAttrs      = buildAttrs(digest)
-        val encDigest      = buildOctetString(rawSig)
+        val digestAlgIds    = buildSet(digestAlgId)
+        val authAttrs       = buildAttrs(digest)
+        val encDigest       = buildOctetString(rawSig)
 
         val signerInfo = buildSeq(
             buildInteger(BigInteger.ONE) +
@@ -448,15 +429,14 @@ object ApkSignerV2 {
         else      -> byteArrayOf(0x82.toByte(), (len shr 8).toByte(), (len and 0xff).toByte())
     }
 
-    private fun buildTlv(tag: Byte, content: ByteArray) =
-        byteArrayOf(tag) + buildLen(content.size) + content
-
-    private fun buildSeq(c: ByteArray)         = buildTlv(0x30, c)
-    private fun buildSet(c: ByteArray)         = buildTlv(0x31, c)
-    private fun buildOid(o: ByteArray)         = buildTlv(0x06, o)
-    private fun buildOctetString(d: ByteArray) = buildTlv(0x04, d)
-    private fun buildNull()                    = byteArrayOf(0x05, 0x00)
-    private fun buildRaw(d: ByteArray)         = d
+    private fun buildTlv(tag: Byte, c: ByteArray) = byteArrayOf(tag) + buildLen(c.size) + c
+    private fun buildSeq(c: ByteArray)             = buildTlv(0x30, c)
+    private fun buildSet(c: ByteArray)             = buildTlv(0x31, c)
+    private fun buildOid(o: ByteArray)             = buildTlv(0x06, o)
+    private fun buildOctetString(d: ByteArray)     = buildTlv(0x04, d)
+    private fun buildNull()                        = byteArrayOf(0x05, 0x00)
+    private fun buildRaw(d: ByteArray)             = byteArrayOf(0x05, 0x00)
+    private fun buildRaw(d: ByteArray)             = d
 
     private fun buildInteger(n: BigInteger): ByteArray {
         var b = n.toByteArray()
@@ -467,13 +447,10 @@ object ApkSignerV2 {
 
     private fun prefixU32(data: ByteArray): ByteArray {
         val buf = ByteBuffer.allocate(4 + data.size).order(ByteOrder.LITTLE_ENDIAN)
-        buf.putInt(data.size); buf.put(data)
-        return buf.array()
+        buf.putInt(data.size); buf.put(data); return buf.array()
     }
-
     private fun u32le(v: Int): ByteArray =
         ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()
-
     private fun u64le(v: Long): ByteArray =
         ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(v).array()
 
@@ -490,14 +467,13 @@ object ApkSignerV2 {
 
     private fun injectEntry(zos: ZipOutputStream, name: String, data: ByteArray) {
         zos.putNextEntry(ZipEntry(name).apply { method = ZipEntry.DEFLATED })
-        zos.write(data)
-        zos.closeEntry()
+        zos.write(data); zos.closeEntry()
     }
 
-    // ── Key + Cert loading ────────────────────────────────────────────────────
+    // ── Key + Cert ────────────────────────────────────────────────────────────
 
     private fun loadKey(): PrivateKey {
-        val der  = android.util.Base64.decode(
+        val der = android.util.Base64.decode(
             PK8.replace("\n", "").replace(" ", ""), android.util.Base64.DEFAULT)
         return KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(der))
     }
@@ -505,7 +481,7 @@ object ApkSignerV2 {
     private fun loadCert(): X509Certificate {
         val der = android.util.Base64.decode(
             CERT_B64.replace("\n", "").replace(" ", ""), android.util.Base64.DEFAULT)
-        val cf  = java.security.cert.CertificateFactory.getInstance("X.509")
-        return cf.generateCertificate(ByteArrayInputStream(der)) as X509Certificate
+        return java.security.cert.CertificateFactory.getInstance("X.509")
+            .generateCertificate(ByteArrayInputStream(der)) as X509Certificate
     }
 }
