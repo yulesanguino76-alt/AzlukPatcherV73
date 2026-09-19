@@ -3,6 +3,13 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Load local.properties for secrets
+def localProps = new Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { localProps.load(it) }
+}
+
 android {
     compileSdk 34
     namespace 'com.azluk.patcher'
@@ -12,7 +19,29 @@ android {
         minSdk 26
         targetSdk 34
         versionCode 7
-        versionName "7.0"
+        versionName "7.3"
+
+        // ── TokenRouter config ────────────────────────────────────────────────
+        // Set in local.properties (never commit this file) or GitHub Actions secrets.
+        //
+        // local.properties:
+        //   TOKENROUTER_API_KEY=sk-ftEt...
+        //   TOKENROUTER_MODEL=anthropic/claude-3-5-sonnet   (or any of 300+ models)
+        //   TOKENROUTER_BASE_URL=https://api.tokenrouter.com/v1
+        //
+        // GitHub Actions: add TOKENROUTER_API_KEY as a repo secret, then pass:
+        //   ./gradlew assembleDebug -PTOKENROUTER_API_KEY=${{ secrets.TOKENROUTER_API_KEY }}
+
+        def trKey  = localProps.getProperty('TOKENROUTER_API_KEY', '')
+                  ?: System.getenv('TOKENROUTER_API_KEY') ?: ''
+        def trModel = localProps.getProperty('TOKENROUTER_MODEL', '')
+                  ?: System.getenv('TOKENROUTER_MODEL') ?: 'anthropic/claude-3-5-sonnet'
+        def trBase  = localProps.getProperty('TOKENROUTER_BASE_URL', '')
+                  ?: System.getenv('TOKENROUTER_BASE_URL') ?: 'https://api.tokenrouter.com/v1'
+
+        buildConfigField "String", "TOKENROUTER_API_KEY",  "\"$trKey\""
+        buildConfigField "String", "TOKENROUTER_MODEL",    "\"$trModel\""
+        buildConfigField "String", "TOKENROUTER_BASE_URL", "\"$trBase\""
     }
 
     buildTypes {
@@ -28,7 +57,8 @@ android {
     kotlinOptions { jvmTarget = '17' }
 
     buildFeatures {
-        compose true
+        compose     true
+        buildConfig true   // needed for BuildConfig.ANTHROPIC_API_KEY
     }
 
     composeOptions {
@@ -43,7 +73,6 @@ android {
 }
 
 dependencies {
-    // Compose BOM — pins all compose versions coherently
     def composeBom = platform('androidx.compose:compose-bom:2024.02.00')
     implementation composeBom
 
@@ -59,11 +88,9 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
-
-    // Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
-
     implementation 'com.google.accompanist:accompanist-drawablepainter:0.32.0'
+
     debugImplementation 'androidx.compose.ui:ui-tooling'
     debugImplementation 'androidx.compose.ui:ui-test-manifest'
 }
